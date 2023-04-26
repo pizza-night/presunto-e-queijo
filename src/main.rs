@@ -2,16 +2,12 @@ use std::{future::ready, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
 use futures::StreamExt;
+use presunto_e_queijo::{client, peer_discovery, ui};
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::mpsc,
     task::spawn_blocking,
 };
-
-mod client;
-mod message;
-mod peer_discovery;
-mod ui;
 
 #[derive(Parser)]
 struct Args {

@@ -7,7 +7,7 @@ use cursive::{
 };
 use tokio::sync::mpsc::{error::TryRecvError, Receiver, Sender};
 
-use crate::message::ArcStr;
+use crate::ArcStr;
 
 pub enum TuiMessage {
     UserConnected { username: ArcStr },

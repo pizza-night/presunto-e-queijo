@@ -12,8 +12,8 @@ use tokio::{
 };
 
 use crate::{
-    message::{self, ArcStr, PizzaMessage},
-    ui,
+    message::{self, PizzaMessage},
+    ui, ArcStr,
 };
 
 pub async fn run(
@@ -31,7 +31,9 @@ pub async fn run(
         .collect();
 
     for p in peers.values() {
-        let tui_msg = ui::TuiMessage::UserConnected { username: p.name.clone() };
+        let tui_msg = ui::TuiMessage::UserConnected {
+            username: p.name.clone(),
+        };
         if external_message.send(tui_msg).await.is_err() {
             return Ok(());
         }

@@ -1,10 +1,10 @@
-use std::{io, sync::Arc};
+use std::io;
 
 use bytes::BufMut;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub type ArcStr = Arc<str>;
+use crate::ArcStr;
 
 #[derive(Debug)]
 pub enum PizzaMessage {
@@ -51,7 +51,7 @@ impl PizzaMessage {
                 sink.write_u8(0).await?;
                 sink.write_u32(body.len() as _).await?;
                 sink.write_all(body.as_bytes()).await?;
-            },
+            }
         }
 
         Ok(())

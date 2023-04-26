@@ -8,7 +8,7 @@ use std::{
 use thiserror::Error;
 use tokio::fs;
 
-use crate::message::ArcStr;
+use crate::ArcStr;
 
 #[derive(Debug)]
 pub struct Peer {
