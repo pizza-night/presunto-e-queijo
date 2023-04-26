@@ -17,7 +17,7 @@ struct Args {
     config: PathBuf,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let Args { port, config } = Args::parse();
 
