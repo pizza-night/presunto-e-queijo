@@ -7,12 +7,12 @@ use cursive::{
 };
 use tokio::sync::mpsc::{error::TryRecvError, Receiver, Sender};
 
-use crate::ArcStr;
+use crate::Str;
 
 pub enum TuiMessage {
-    UserConnected { username: ArcStr },
-    UserDisconnected { username: ArcStr },
-    NewMessage { username: ArcStr, message: ArcStr },
+    UserConnected { username: Str },
+    UserDisconnected { username: Str },
+    NewMessage { username: Str, message: Str },
 }
 
 fn display_new_message(c: &mut Cursive, username: &str, message: &str) {
@@ -21,7 +21,7 @@ fn display_new_message(c: &mut Cursive, username: &str, message: &str) {
     });
 }
 
-pub fn ui(mut messages: Receiver<TuiMessage>, send_message: Sender<ArcStr>) {
+pub fn ui(mut messages: Receiver<TuiMessage>, send_message: Sender<Str>) {
     let mut cursive = Cursive::default();
     cursive.add_layer(
         Dialog::new()

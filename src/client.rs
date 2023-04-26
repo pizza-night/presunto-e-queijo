@@ -1,6 +1,6 @@
-use std::{collections::HashMap, future::ready, io, net::SocketAddr};
+use std::{collections::HashMap, future::ready, io, net::SocketAddr, pin::Pin};
 
-use futures::{stream, StreamExt};
+use futures::{stream, Stream, StreamExt};
 use futures_buffered::FuturesUnorderedBounded;
 use thiserror::Error;
 use tokio::{
@@ -9,26 +9,25 @@ use tokio::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpListener, TcpStream,
     },
-    sync::mpsc::{self, Receiver, Sender},
-    task::JoinHandle,
+    sync::mpsc::{Receiver, Sender},
 };
 
 use crate::{
     message::{self, PizzaMessage},
-    ui, ArcStr,
+    ui, Str,
 };
 
 pub async fn run(
-    peers: Vec<(ArcStr, TcpStream)>,
+    peers: Vec<(Str, TcpStream)>,
     server: TcpListener,
     external_message: Sender<ui::TuiMessage>,
-    internal_message: Receiver<ArcStr>,
+    internal_message: Receiver<Str>,
 ) -> io::Result<()> {
     let peers: HashMap<SocketAddr, Peer> = peers
         .into_iter()
-        .map(|p| {
-            let ip = p.1.peer_addr().unwrap();
-            (ip, Peer::new(p.0, p.1))
+        .map(|(name, socket)| {
+            let ip = socket.peer_addr().unwrap();
+            (ip, Peer::new(name, socket))
         })
         .collect();
 
@@ -57,21 +56,18 @@ pub async fn run(
 }
 
 struct Peer {
-    name: ArcStr,
-    message_channel: Receiver<PizzaMessage>,
+    name: Str,
+    messages: Pin<Box<dyn Stream<Item = PizzaMessage>>>,
     socket: OwnedWriteHalf,
-    _handle: JoinHandle<()>,
 }
 
 impl Peer {
-    fn new(name: ArcStr, socket: TcpStream) -> Self {
-        let (tx, rx) = mpsc::channel(1);
+    fn new(name: Str, socket: TcpStream) -> Self {
         let (rx_socket, tx_socket) = socket.into_split();
         Self {
             name,
-            message_channel: rx,
+            messages: Box::pin(receive_messages(rx_socket)),
             socket: tx_socket,
-            _handle: tokio::spawn(async move { receive_messages(rx_socket, tx).await }),
         }
     }
 }
@@ -82,7 +78,7 @@ struct Client {
     peers: Peers,
     server: TcpListener,
     external_message: Sender<ui::TuiMessage>,
-    internal_message: Receiver<ArcStr>,
+    internal_message: Receiver<Str>,
 }
 
 #[derive(Error, Debug)]
@@ -130,8 +126,8 @@ impl Client {
 
     async fn notify_new_message(
         &self,
-        username: ArcStr,
-        message: ArcStr,
+        username: Str,
+        message: Str,
     ) -> Result<(), ClientTermination> {
         let tui_msg = ui::TuiMessage::NewMessage { username, message };
         self.external_message
@@ -140,7 +136,7 @@ impl Client {
             .map_err(|_| ClientTermination::UiClosed)
     }
 
-    async fn notify_connected(&self, username: ArcStr) -> Result<(), ClientTermination> {
+    async fn notify_connected(&self, username: Str) -> Result<(), ClientTermination> {
         let tui_msg = ui::TuiMessage::UserConnected { username };
         self.external_message
             .send(tui_msg)
@@ -148,7 +144,7 @@ impl Client {
             .map_err(|_| ClientTermination::UiClosed)
     }
 
-    async fn notify_disconnected(&self, username: ArcStr) -> Result<(), ClientTermination> {
+    async fn notify_disconnected(&self, username: Str) -> Result<(), ClientTermination> {
         let tui_msg = ui::TuiMessage::UserDisconnected { username };
         self.external_message
             .send(tui_msg)
@@ -156,13 +152,13 @@ impl Client {
             .map_err(|_| ClientTermination::UiClosed)
     }
 
-    async fn broadcast_message(&mut self, message: ArcStr) -> Vec<SocketAddr> {
-        stream::iter(self.peers.iter_mut().map(|(addr, p)| async {
-            let msg = PizzaMessage::Text {
-                body: message.clone(),
-            };
-            (*addr, msg.write(&mut p.socket).await)
-        }))
+    async fn broadcast_message(&mut self, message: Str) -> Vec<SocketAddr> {
+        let msg = PizzaMessage::Text { body: message };
+        stream::iter(
+            self.peers
+                .iter_mut()
+                .map(|(addr, p)| async { (*addr, msg.write(&mut p.socket).await) }),
+        )
         .buffer_unordered(16)
         .filter_map(|(addr, result)| ready(result.is_err().then_some(addr)))
         .collect()
@@ -171,7 +167,7 @@ impl Client {
 
     async fn handle_disconnect_of(&mut self, peer: SocketAddr) -> Result<(), ClientTermination> {
         let peer = self.peers.remove(&peer).unwrap();
-        self.notify_disconnected(peer.name.clone()).await
+        self.notify_disconnected(peer.name).await
     }
 
     async fn handle_connection_of(
@@ -192,7 +188,7 @@ async fn read_message(peers: &mut Peers) -> Option<Result<(SocketAddr, PizzaMess
     }
 
     FuturesUnorderedBounded::from_iter(peers.iter_mut().map(|(addr, p)| async {
-        match p.message_channel.recv().await {
+        match p.messages.next().await {
             Some(msg) => Ok((*addr, msg)),
             None => Err(*addr),
         }
@@ -201,28 +197,27 @@ async fn read_message(peers: &mut Peers) -> Option<Result<(SocketAddr, PizzaMess
     .await
 }
 
-async fn recv_msg(r: &mut Receiver<ArcStr>) -> Result<ArcStr, ClientTermination> {
+async fn recv_msg(r: &mut Receiver<Str>) -> Result<Str, ClientTermination> {
     r.recv().await.ok_or_else(|| ClientTermination::UiClosed)
 }
 
-async fn receive_messages(socket: OwnedReadHalf, message_channel: Sender<PizzaMessage>) {
-    let mut buffered = BufReader::new(socket);
-    loop {
-        let msg = match PizzaMessage::read(&mut buffered).await {
-            Ok(msg) => msg,
-            Err(message::ParseError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                return;
-            }
-            Err(e) => {
-                eprintln!(
-                    "failed to read message from peer {:?}: {e:?}",
-                    buffered.get_ref().peer_addr()
-                );
-                continue;
-            }
-        };
-        if message_channel.send(msg).await.is_err() {
-            break;
-        };
+fn receive_messages(socket: OwnedReadHalf) -> impl Stream<Item = PizzaMessage> {
+    async_stream::stream! {
+        let mut buffered = BufReader::new(socket);
+        loop {
+            match PizzaMessage::read(&mut buffered).await {
+                Ok(msg) => yield msg,
+                Err(message::ParseError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                    break;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "failed to read message from peer {:?}: {e:?}",
+                        buffered.get_ref().peer_addr()
+                    );
+                    continue;
+                }
+            };
+        }
     }
 }

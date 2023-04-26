@@ -8,11 +8,11 @@ use std::{
 use thiserror::Error;
 use tokio::fs;
 
-use crate::ArcStr;
+use crate::Str;
 
 #[derive(Debug)]
 pub struct Peer {
-    pub name: ArcStr,
+    pub name: Str,
     pub addr: SocketAddr,
 }
 
