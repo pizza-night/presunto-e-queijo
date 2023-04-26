@@ -1,8 +1,10 @@
 use std::{collections::HashMap, future::ready, io, net::SocketAddr};
 
-use futures::{stream, FutureExt, StreamExt};
+use futures::{stream, StreamExt};
+use futures_buffered::FuturesUnorderedBounded;
 use thiserror::Error;
 use tokio::{
+    io::BufReader,
     net::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpListener, TcpStream,
@@ -117,9 +119,7 @@ impl Client {
                     }
                 }
                 new_message = recv_msg(&mut self.internal_message) => {
-                    let new_message = new_message?;
-                    self.notify_new_message("me".into(), new_message.clone()).await?;
-                    let disconnected = self.broadcast_message(new_message).await;
+                    let disconnected = self.broadcast_message(new_message?).await;
                     for peer in disconnected {
                         self.handle_disconnect_of(peer).await?;
                     }
@@ -191,26 +191,24 @@ async fn read_message(peers: &mut Peers) -> Option<Result<(SocketAddr, PizzaMess
         return None;
     }
 
-    let (message, _, _) = futures::future::select_all(peers.iter_mut().map(|(addr, p)| {
-        async {
-            match p.message_channel.recv().await {
-                Some(msg) => Ok((*addr, msg)),
-                None => Err(*addr),
-            }
+    FuturesUnorderedBounded::from_iter(peers.iter_mut().map(|(addr, p)| async {
+        match p.message_channel.recv().await {
+            Some(msg) => Ok((*addr, msg)),
+            None => Err(*addr),
         }
-        .boxed()
     }))
-    .await;
-    Some(message)
+    .next()
+    .await
 }
 
 async fn recv_msg(r: &mut Receiver<ArcStr>) -> Result<ArcStr, ClientTermination> {
     r.recv().await.ok_or_else(|| ClientTermination::UiClosed)
 }
 
-async fn receive_messages(mut socket: OwnedReadHalf, message_channel: Sender<PizzaMessage>) {
+async fn receive_messages(socket: OwnedReadHalf, message_channel: Sender<PizzaMessage>) {
+    let mut buffered = BufReader::new(socket);
     loop {
-        let msg = match PizzaMessage::read(&mut socket).await {
+        let msg = match PizzaMessage::read(&mut buffered).await {
             Ok(msg) => msg,
             Err(message::ParseError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
                 return;
@@ -218,7 +216,7 @@ async fn receive_messages(mut socket: OwnedReadHalf, message_channel: Sender<Piz
             Err(e) => {
                 eprintln!(
                     "failed to read message from peer {:?}: {e:?}",
-                    socket.peer_addr()
+                    buffered.get_ref().peer_addr()
                 );
                 continue;
             }

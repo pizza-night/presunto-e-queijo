@@ -15,6 +15,12 @@ pub enum TuiMessage {
     NewMessage { username: ArcStr, message: ArcStr },
 }
 
+fn display_new_message(c: &mut Cursive, username: &str, message: &str) {
+    c.call_on_name("messages", |messages: &mut LinearLayout| {
+        messages.add_child(TextView::new(format!("{}: {}", username, message)));
+    });
+}
+
 pub fn ui(mut messages: Receiver<TuiMessage>, send_message: Sender<ArcStr>) {
     let mut cursive = Cursive::default();
     cursive.add_layer(
@@ -33,6 +39,7 @@ pub fn ui(mut messages: Receiver<TuiMessage>, send_message: Sender<ArcStr>) {
                         EditView::new()
                             .on_submit(move |s, msg| {
                                 s.call_on_name("message", |ev: &mut EditView| ev.set_content(""));
+                                display_new_message(s, "me", msg);
                                 if send_message.blocking_send(msg.into()).is_err() {
                                     s.quit();
                                 }
@@ -61,20 +68,18 @@ pub fn ui(mut messages: Receiver<TuiMessage>, send_message: Sender<ArcStr>) {
             match m {
                 TuiMessage::UserConnected { username } => {
                     runner.call_on_name("users", |users: &mut LinearLayout| {
-                        users.add_child(TextView::new(&username[..]).with_name(&username[..]));
+                        users.add_child(TextView::new(&*username).with_name(&*username));
                     });
                 }
                 TuiMessage::UserDisconnected { username } => {
                     runner.call_on_name("users", |users: &mut LinearLayout| {
-                        if let Some(u) = users.find_child_from_name(&username[..]) {
+                        if let Some(u) = users.find_child_from_name(&username) {
                             users.remove_child(u);
                         }
                     });
                 }
                 TuiMessage::NewMessage { username, message } => {
-                    runner.call_on_name("messages", |messages: &mut LinearLayout| {
-                        messages.add_child(TextView::new(format!("{}: {}", username, message)));
-                    });
+                    display_new_message(&mut runner, &username, &message)
                 }
             }
             runner.refresh();
