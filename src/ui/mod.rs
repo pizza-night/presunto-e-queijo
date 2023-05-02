@@ -1,6 +1,7 @@
+mod backend;
+use backend::Backend;
 use cursive::{
     align::HAlign,
-    backends::curses::n::Backend,
     theme::Effect,
     utils::span::SpannedString,
     view::{Nameable, Resizable, ScrollStrategy, SizeConstraint},
@@ -28,7 +29,7 @@ fn display_new_message(c: &mut Cursive, username: &str, message: &str) {
 }
 
 pub fn ui(mut messages: Receiver<TuiMessage>, send_message: Sender<Str>) {
-    let mut cursive = Cursive::default();
+    let mut cursive = Cursive::new();
     cursive.with_theme(|current| {
         use cursive::theme::{Color, PaletteColor};
         let color = Color::Rgb(93, 26, 20);

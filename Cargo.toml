@@ -10,7 +10,7 @@ anyhow = "1.0.70"
 async-stream = "0.3.5"
 bytes = "1.4.0"
 clap = { version = "4.2.4", features = ["derive"] }
-cursive = "0.20.0"
+cursive = { version = "0.20.0", features = ["crossterm-backend"] }
 futures = "0.3.28"
 futures-buffered = "0.2.4"
 nom = "7.1.3"

@@ -41,7 +41,7 @@ impl PizzaMessage {
         };
 
         Ok(PizzaMessage::Text {
-            body: String::from_utf8(vec)?.into()
+            body: String::from_utf8(vec)?.into(),
         })
     }
 }
