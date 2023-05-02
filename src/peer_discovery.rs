@@ -42,7 +42,7 @@ impl Display for ConfigParseError {
         writeln!(
             f,
             "config parse error at {line}:{col}: {kind}",
-            line = self.line_no,
+            line = self.line_no + 1,
             col = self.column,
             kind = self.kind,
         )?;

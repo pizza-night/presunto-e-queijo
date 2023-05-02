@@ -1,6 +1,8 @@
 use cursive::{
     align::HAlign,
     backends::curses::n::Backend,
+    theme::Effect,
+    utils::span::SpannedString,
     view::{Nameable, Resizable, ScrollStrategy, SizeConstraint},
     views::{Dialog, EditView, LinearLayout, ScrollView, TextView},
     Cursive,
@@ -17,15 +19,25 @@ pub enum TuiMessage {
 
 fn display_new_message(c: &mut Cursive, username: &str, message: &str) {
     c.call_on_name("messages", |messages: &mut LinearLayout| {
-        messages.add_child(TextView::new(format!("{}: {}", username, message)));
+        let mut text = SpannedString::default();
+        text.append_styled(username, Effect::Bold);
+        text.append_plain(": ");
+        text.append_plain(message);
+        messages.add_child(TextView::new(text));
     });
 }
 
 pub fn ui(mut messages: Receiver<TuiMessage>, send_message: Sender<Str>) {
     let mut cursive = Cursive::default();
+    cursive.with_theme(|current| {
+        use cursive::theme::{Color, PaletteColor};
+        let color = Color::Rgb(93, 26, 20);
+        current.palette[PaletteColor::Background] = color;
+        current.palette[PaletteColor::Secondary] = color;
+    });
     cursive.add_layer(
         Dialog::new()
-            .title("Presunto e Queijo")
+            .title(SpannedString::styled("Presunto e Queijo", Effect::Bold))
             .content(
                 LinearLayout::vertical()
                     .child(LinearLayout::horizontal().with_name("users"))
