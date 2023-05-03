@@ -18,7 +18,13 @@ if [[ "$2" ]]; then
     echo "connecting to initial peer $p_ip"
 fi
 
+if [[ "$USERNAME" ]]; then
+    username=$USERNAME
+else
+    username=$1
+fi
+
 sudo ip netns exec $1 \
     ./target/debug/presunto-e-queijo \
-    -u $1 "${initial_peer[@]}" \
+    -u $username "${initial_peer[@]}" \
     --debug-logs /tmp/$1

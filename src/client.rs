@@ -36,8 +36,8 @@ pub struct ClientOpts {
 
 pub async fn run(
     initial_peers: peer_config::Peers,
-    external_message: Sender<ui::UiEvent>,
-    internal_message: Receiver<Str>,
+    external_message: Sender<ui::Event>,
+    internal_message: Receiver<ui::Request>,
     ClientOpts { port, username }: ClientOpts,
 ) -> io::Result<()> {
     tracing::debug!("starting server");
@@ -133,11 +133,8 @@ impl Client {
                         Err(addr) => self.handle_disconnect_of(addr).await?,
                     }
                 }
-                new_message = self.ui.recv_msg() => {
-                    let disconnected = self.broadcast_message(new_message?).await;
-                    for peer in disconnected {
-                        self.handle_disconnect_of(peer).await?;
-                    }
+                ui_request = self.ui.recv_ui_request() => {
+                    self.handle_ui_request(ui_request?).await?;
                 }
             }
         }
@@ -169,96 +166,11 @@ impl Client {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self))]
-    async fn new_text_message(
-        &mut self,
-        peer: SocketAddr,
-        body: Str,
-    ) -> Result<(), ClientTermination> {
-        let name = &self.peers[&peer].name;
-        self.ui.notify_new_message(peer, name.clone(), body).await
-    }
-
-    #[tracing::instrument(skip(self))]
-    async fn set_name(&mut self, peer: SocketAddr, name: Str) -> Result<(), ClientTermination> {
-        if let Some(p) = self.peers.get_mut(&peer) {
-            if p.name.as_ref() != Some(&name) {
-                let new = p.name.insert(name);
-                self.ui.notify_change_name(peer, new.clone()).await?;
-            }
-        }
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self, ips))]
-    async fn add_new_peers(
-        &mut self,
-        ips: impl Iterator<Item = SocketAddr>,
-    ) -> Result<(), ClientTermination> {
-        let ips = ips
-            .filter(|ip| !self.peers.contains_key(ip))
-            .collect::<Vec<_>>();
-
-        let username = take(&mut self.username);
-        let Self { peers, ref ui, .. } = self;
-        let set_name = PizzaMessage::SetName { name: username };
-        {
-            let set_name = &set_name;
-            let connected_peers = stream::iter(ips)
-            .map(|addr| async move {
-                match timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
-                    Ok(Ok(mut sock)) => {
-                        if let Err(e) = set_name.write(&mut sock).await {
-                            tracing::error!(to = %addr, ?e, "failed to send set name to new peer");
-                        }
-                        Some(sock)
-                    }
-                    _ => None,
-                }
-            })
-            .buffered(16)
-            .filter_map(ready)
-            .then(|sock| async move {
-                let peer_addr = sock.peer_addr().unwrap();
-                let peer = Peer::new(None, sock);
-
-                ui.notify_connected(peer_addr, None).await?;
-
-                Ok::<_, ClientTermination>((peer_addr, peer))
-            });
-
-            let mut connected_peers = pin!(connected_peers);
-            while let Some(connected_peer) = connected_peers.next().await {
-                let (addr, peer) = connected_peer?;
-                peers.insert(addr, peer);
-            }
-        }
-
-        let PizzaMessage::SetName { name } = set_name else {
-            unreachable!()
-        };
-        self.username = name;
-        Ok(())
-    }
-
-    #[instrument(skip(self))]
-    async fn broadcast_message(&mut self, message: Str) -> Vec<SocketAddr> {
-        let msg = PizzaMessage::Text { body: message };
-        stream::iter(self.peers.iter_mut().map(|(addr, p)| {
-            tracing::debug!(?msg, to = ?addr, "sending message");
-            async { (*addr, msg.write(&mut p.socket).await) }
-        }))
-        .buffer_unordered(16)
-        .filter_map(|(addr, result)| ready(result.is_err().then_some(addr)))
-        .collect()
-        .await
-    }
-
     #[instrument(skip(self))]
     async fn handle_disconnect_of(&mut self, peer: SocketAddr) -> Result<(), ClientTermination> {
         self.peers.remove(&peer).unwrap();
         tracing::debug!("disconnected");
-        self.ui.notify_disconnected(peer).await
+        self.ui.user_disconnected(peer).await
     }
 
     #[instrument(skip(self, socket))]
@@ -302,9 +214,114 @@ impl Client {
                 return Ok(());
             }
         }
-        self.ui.notify_connected(from, peer.name.clone()).await?;
+        self.ui.user_connected(from, peer.name.clone()).await?;
         self.peers.insert(from, peer);
         Ok(())
+    }
+
+    #[instrument(skip(self))]
+    async fn handle_ui_request(
+        &mut self,
+        ui_request: ui::Request,
+    ) -> Result<(), ClientTermination> {
+        let disconnected = match ui_request {
+            ui::Request::SendMessage { body } => {
+                self.broadcast_message(PizzaMessage::Text { body }).await
+            }
+            ui::Request::ChangeName { name } => {
+                self.broadcast_message(PizzaMessage::SetName { name }).await
+            }
+        };
+        for peer in disconnected {
+            self.handle_disconnect_of(peer).await?;
+        }
+        Ok(())
+    }
+}
+
+impl Client {
+    #[tracing::instrument(skip(self))]
+    async fn new_text_message(
+        &mut self,
+        peer: SocketAddr,
+        body: Str,
+    ) -> Result<(), ClientTermination> {
+        let name = &self.peers[&peer].name;
+        self.ui.new_message(peer, name.clone(), body).await
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn set_name(&mut self, peer: SocketAddr, name: Str) -> Result<(), ClientTermination> {
+        if let Some(p) = self.peers.get_mut(&peer) {
+            if p.name.as_ref() != Some(&name) {
+                let new = p.name.insert(name);
+                self.ui.change_name(peer, new.clone()).await?;
+            }
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ips))]
+    async fn add_new_peers(
+        &mut self,
+        ips: impl Iterator<Item = SocketAddr>,
+    ) -> Result<(), ClientTermination> {
+        let ips = ips
+            .filter(|ip| !self.peers.contains_key(ip))
+            .collect::<Vec<_>>();
+
+        let username = take(&mut self.username);
+        let Self { peers, ref ui, .. } = self;
+        let set_name = PizzaMessage::SetName { name: username };
+        {
+            let set_name = &set_name;
+            let connected_peers = stream::iter(ips)
+            .map(|addr| async move {
+                match timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
+                    Ok(Ok(mut sock)) => {
+                        if let Err(e) = set_name.write(&mut sock).await {
+                            tracing::error!(to = %addr, ?e, "failed to send set name to new peer");
+                        }
+                        Some(sock)
+                    }
+                    _ => None,
+                }
+            })
+            .buffered(16)
+            .filter_map(ready)
+            .then(|sock| async move {
+                let peer_addr = sock.peer_addr().unwrap();
+                let peer = Peer::new(None, sock);
+
+                ui.user_connected(peer_addr, None).await?;
+
+                Ok::<_, ClientTermination>((peer_addr, peer))
+            });
+
+            let mut connected_peers = pin!(connected_peers);
+            while let Some(connected_peer) = connected_peers.next().await {
+                let (addr, peer) = connected_peer?;
+                peers.insert(addr, peer);
+            }
+        }
+
+        let PizzaMessage::SetName { name } = set_name else {
+            unreachable!()
+        };
+        self.username = name;
+        Ok(())
+    }
+
+    #[instrument(skip(self))]
+    async fn broadcast_message(&mut self, message: PizzaMessage) -> Vec<SocketAddr> {
+        stream::iter(self.peers.iter_mut().map(|(addr, p)| {
+            tracing::debug!(?message, to = ?addr, "sending message");
+            async { (*addr, message.write(&mut p.socket).await) }
+        }))
+        .buffer_unordered(16)
+        .filter_map(|(addr, result)| ready(result.is_err().then_some(addr)))
+        .collect()
+        .await
     }
 }
 
@@ -345,18 +362,18 @@ fn receive_messages(socket: OwnedReadHalf) -> impl Stream<Item = PizzaMessage> {
 }
 
 struct UiHandle {
-    external_message: Sender<ui::UiEvent>,
-    internal_message: Receiver<Str>,
+    external_message: Sender<ui::Event>,
+    internal_message: Receiver<ui::Request>,
 }
 
 impl UiHandle {
-    async fn notify_new_message(
+    async fn new_message(
         &self,
         at: SocketAddr,
         username: Option<Str>,
         message: Str,
     ) -> Result<(), ClientTermination> {
-        let tui_msg = ui::UiEvent::NewMessage {
+        let tui_msg = ui::Event::NewMessage {
             at,
             username,
             message,
@@ -367,39 +384,39 @@ impl UiHandle {
             .map_err(|_| ClientTermination::UiClosed)
     }
 
-    async fn notify_connected(
+    async fn user_connected(
         &self,
         at: SocketAddr,
         username: Option<Str>,
     ) -> Result<(), ClientTermination> {
-        let tui_msg = ui::UiEvent::UserConnected { at, username };
+        let tui_msg = ui::Event::UserConnected { at, username };
         self.external_message
             .send(tui_msg)
             .await
             .map_err(|_| ClientTermination::UiClosed)
     }
 
-    async fn notify_disconnected(&self, at: SocketAddr) -> Result<(), ClientTermination> {
-        let tui_msg = ui::UiEvent::UserDisconnected { at };
+    async fn user_disconnected(&self, at: SocketAddr) -> Result<(), ClientTermination> {
+        let tui_msg = ui::Event::UserDisconnected { at };
         self.external_message
             .send(tui_msg)
             .await
             .map_err(|_| ClientTermination::UiClosed)
     }
 
-    async fn notify_change_name(
+    async fn change_name(
         &self,
         at: SocketAddr,
         new_username: Str,
     ) -> Result<(), ClientTermination> {
-        let tui_msg = ui::UiEvent::UpdateUserName { at, new_username };
+        let tui_msg = ui::Event::UpdateUserName { at, new_username };
         self.external_message
             .send(tui_msg)
             .await
             .map_err(|_| ClientTermination::UiClosed)
     }
 
-    async fn recv_msg(&mut self) -> Result<Str, ClientTermination> {
+    async fn recv_ui_request(&mut self) -> Result<ui::Request, ClientTermination> {
         self.internal_message
             .recv()
             .await

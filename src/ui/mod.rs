@@ -1,5 +1,7 @@
 mod backend;
-use std::net::SocketAddr;
+mod views;
+
+use std::net::{Ipv4Addr, SocketAddr};
 
 use backend::Backend;
 use cursive::{
@@ -14,8 +16,10 @@ use tokio::sync::mpsc::{error::TryRecvError, Receiver, Sender};
 
 use crate::Str;
 
+use self::views::MessageView;
+
 #[derive(Debug)]
-pub enum UiEvent {
+pub enum Event {
     UserConnected {
         at: SocketAddr,
         username: Option<Str>,
@@ -34,17 +38,43 @@ pub enum UiEvent {
     },
 }
 
-fn display_new_message(c: &mut Cursive, username: &str, message: &str) {
-    c.call_on_name("messages", |messages: &mut LinearLayout| {
-        let mut text = SpannedString::default();
-        text.append_styled(username, Effect::Bold);
-        text.append_plain(": ");
-        text.append_plain(message);
-        messages.add_child(TextView::new(text));
+#[derive(Debug)]
+pub enum Request {
+    SendMessage { body: Str },
+    ChangeName { name: Str },
+}
+
+mod named_views {
+    pub const TEXT_BOX: &str = "text-box";
+    pub const MESSAGES: &str = "messages";
+    pub const USERS: &str = "users";
+}
+
+fn display_new_message(c: &mut Cursive, addr: SocketAddr, username: Str, message: Str) {
+    c.call_on_name(named_views::MESSAGES, |messages: &mut LinearLayout| {
+        messages.add_child(MessageView::new(addr, username, message));
     });
 }
 
-pub fn ui(mut messages: Receiver<UiEvent>, send_message: Sender<Str>) {
+fn change_name_dialog(send_message: Sender<Request>) -> Dialog {
+    Dialog::new()
+        .title("change name")
+        .content(
+            LinearLayout::vertical().child(EditView::new().on_submit(move |s, msg| {
+                if send_message
+                    .blocking_send(Request::ChangeName { name: msg.into() })
+                    .is_err()
+                {
+                    s.quit()
+                } else {
+                    s.pop_layer();
+                }
+            })),
+        )
+        .h_align(HAlign::Center)
+}
+
+pub fn ui(mut messages: Receiver<Event>, send_message: Sender<Request>) {
     let mut cursive = Cursive::new();
     cursive.with_theme(|current| {
         use cursive::theme::{Color, PaletteColor};
@@ -57,27 +87,43 @@ pub fn ui(mut messages: Receiver<UiEvent>, send_message: Sender<Str>) {
             .title(SpannedString::styled("Presunto e Queijo", Effect::Bold))
             .content(
                 LinearLayout::vertical()
-                    .child(LinearLayout::vertical().with_name("users"))
+                    .child(LinearLayout::vertical().with_name(named_views::USERS))
                     .child(TextView::new("=".repeat(60)).h_align(HAlign::Center))
                     .child(
-                        ScrollView::new(LinearLayout::vertical().with_name("messages"))
+                        ScrollView::new(LinearLayout::vertical().with_name(named_views::MESSAGES))
                             .scroll_strategy(ScrollStrategy::StickToBottom)
                             .resized(SizeConstraint::Full, SizeConstraint::Full),
                     )
                     .child(
                         EditView::new()
-                            .on_submit(move |s, msg| {
-                                s.call_on_name("message", |ev: &mut EditView| ev.set_content(""));
-                                display_new_message(s, "me", msg);
-                                if send_message.blocking_send(msg.into()).is_err() {
-                                    s.quit();
+                            .on_submit({
+                                let send_message = send_message.clone();
+                                move |s, msg| {
+                                    s.call_on_name(named_views::TEXT_BOX, |ev: &mut EditView| {
+                                        ev.set_content("")
+                                    });
+                                    display_new_message(
+                                        s,
+                                        (Ipv4Addr::LOCALHOST, 2504).into(),
+                                        "me".into(),
+                                        msg.into(),
+                                    );
+                                    if send_message
+                                        .blocking_send(Request::SendMessage { body: msg.into() })
+                                        .is_err()
+                                    {
+                                        s.quit();
+                                    }
                                 }
                             })
-                            .with_name("message"),
+                            .with_name(named_views::TEXT_BOX),
                     ),
             )
             .h_align(HAlign::Center)
-            .button("Quit", |s| s.quit()),
+            .button("Quit", |s| s.quit())
+            .button("Change name", move |s| {
+                s.add_layer(change_name_dialog(send_message.clone()));
+            }),
     );
 
     let mut runner = cursive.runner(Backend::init().unwrap());
@@ -96,18 +142,18 @@ pub fn ui(mut messages: Receiver<UiEvent>, send_message: Sender<Str>) {
             };
             tracing::debug!(?m);
             match m {
-                UiEvent::UserConnected { at, username } => {
+                Event::UserConnected { at, username } => {
                     let at_str = at.to_string();
                     let username = username.as_deref().unwrap_or(&at_str);
-                    runner.call_on_name("users", |users: &mut LinearLayout| {
+                    runner.call_on_name(named_views::USERS, |users: &mut LinearLayout| {
                         users.add_child(
                             TextView::new(format!("{username}@{at}")).with_name(&at_str),
                         );
                     });
                 }
-                UiEvent::UpdateUserName { at, new_username } => {
+                Event::UpdateUserName { at, new_username } => {
                     let at_str = at.to_string();
-                    runner.call_on_name("users", |users: &mut LinearLayout| {
+                    runner.call_on_name(named_views::USERS, |users: &mut LinearLayout| {
                         if let Some(u) = users.find_child_from_name(&at_str) {
                             if let Some(tview) = users
                                 .get_child_mut(u)
@@ -119,22 +165,35 @@ pub fn ui(mut messages: Receiver<UiEvent>, send_message: Sender<Str>) {
                             }
                         }
                     });
+                    runner.call_on_name(named_views::MESSAGES, |messages: &mut LinearLayout| {
+                        for i in 0..messages.len() {
+                            let msg = messages
+                                .get_child_mut(i)
+                                .unwrap()
+                                .downcast_mut::<MessageView>()
+                                .unwrap();
+
+                            if msg.addr() == &at {
+                                msg.set_author(new_username.clone());
+                            }
+                        }
+                    });
                 }
-                UiEvent::UserDisconnected { at } => {
+                Event::UserDisconnected { at } => {
                     let at_str = at.to_string();
-                    runner.call_on_name("users", |users: &mut LinearLayout| {
+                    runner.call_on_name(named_views::USERS, |users: &mut LinearLayout| {
                         if let Some(u) = users.find_child_from_name(&at_str) {
                             users.remove_child(u);
                         }
                     });
                 }
-                UiEvent::NewMessage {
+                Event::NewMessage {
                     at,
                     username,
                     message,
                 } => {
                     let username = username.unwrap_or_else(|| at.to_string().into());
-                    display_new_message(&mut runner, &username, &message)
+                    display_new_message(&mut runner, at, username, message)
                 }
             }
             runner.refresh();
