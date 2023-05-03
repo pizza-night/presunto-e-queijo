@@ -10,16 +10,7 @@ use tokio::fs;
 
 use crate::Str;
 
-#[derive(Debug)]
-pub struct Peer {
-    pub name: Str,
-    pub addr: SocketAddr,
-}
-
-#[derive(Debug)]
-pub struct Peers {
-    pub peers: Vec<Peer>,
-}
+pub type Peers = Vec<(Option<Str>, SocketAddr)>;
 
 #[derive(Error, Debug)]
 pub enum LoadConfigError {
@@ -62,7 +53,7 @@ pub enum ConfigParseErrorKind {
     InvalidIp { found: String },
 }
 
-pub async fn from_config<P: AsRef<Path>>(path: P) -> Result<Peers, LoadConfigError> {
+pub async fn load<P: AsRef<Path>>(path: P) -> Result<Peers, LoadConfigError> {
     let contents = fs::read_to_string(path).await?;
     let peers = contents
         .lines()
@@ -89,12 +80,9 @@ pub async fn from_config<P: AsRef<Path>>(path: P) -> Result<Peers, LoadConfigErr
                         found: ip.to_owned(),
                     },
                 })?;
-            Ok(Peer {
-                name: name.into(),
-                addr: ip,
-            })
+            Ok((Some(name.into()), ip))
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(Peers { peers })
+    Ok(peers)
 }

@@ -1,27 +1,48 @@
-use std::{future::ready, path::PathBuf, process::ExitCode};
+use std::{fs::File, path::PathBuf, process::ExitCode, sync::Arc, net::SocketAddr};
 
 use clap::Parser;
-use futures::StreamExt;
-use presunto_e_queijo::{client, peer_discovery, ui};
-use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::mpsc,
-    task::spawn_blocking,
+use futures::future::OptionFuture;
+use presunto_e_queijo::{
+    client::{self, ClientOpts},
+    peer_config, ui,
 };
+use tokio::{sync::mpsc, task::spawn_blocking};
+use tracing::Level;
 
 #[derive(Parser)]
 struct Args {
     #[arg(short, long, default_value_t = 2504)]
     port: u16,
-    #[arg(short, long, default_value = "./config.pizza")]
-    config: PathBuf,
+    #[arg(short, long)]
+    config: Option<PathBuf>,
+    #[arg(short, long)]
+    initial_peer: Option<SocketAddr>,
+    #[arg(short, long)]
+    username: Option<String>,
+    #[arg(long)]
+    debug_logs: Option<PathBuf>,
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    let Args { port, config } = Args::parse();
+    let Args {
+        port,
+        config,
+        initial_peer,
+        username,
+        debug_logs,
+    } = Args::parse();
 
-    let peers = match peer_discovery::from_config(config).await {
+    if let Some(debug_logs) = debug_logs {
+        enable_logging(debug_logs);
+    }
+
+    let username = username.unwrap_or_else(whoami::username);
+
+    let mut peers = match OptionFuture::from(config.map(peer_config::load))
+        .await
+        .unwrap_or_else(|| Ok(Default::default()))
+    {
         Ok(peers) => peers,
         Err(e) => {
             eprintln!("{e}");
@@ -29,37 +50,33 @@ async fn main() -> ExitCode {
         }
     };
 
+    if let Some(initial_peer) = initial_peer {
+        peers.push((None, initial_peer));
+    }
+
     let (tx_extern_message, rx_extern_message) = mpsc::channel(10);
     let (tx_internal_message, rx_internal_message) = mpsc::channel(10);
 
     let ui_thread = spawn_blocking(|| ui::ui(rx_extern_message, tx_internal_message));
 
-    let server = match TcpListener::bind(("0.0.0.0", port)).await {
-        Ok(socket) => socket,
-        Err(e) => {
-            eprintln!("failed to start the server socket: {e:?}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let peers = futures::stream::iter(peers.peers)
-        .map(|peer| async move {
-            match TcpStream::connect(peer.addr).await {
-                Ok(sock) => Some((peer.name, sock)),
-                Err(_) => None,
-            }
-        })
-        .buffer_unordered(16)
-        .filter_map(ready)
-        .collect::<Vec<_>>()
-        .await;
-
-    let p2p_client = client::run(peers, server, tx_extern_message, rx_internal_message);
+    let p2p_client = client::run(
+        peers,
+        tx_extern_message,
+        rx_internal_message,
+        ClientOpts {
+            port,
+            username: username.into(),
+        },
+    );
 
     tokio::select! {
-        Err(e) = ui_thread => {
-            eprintln!("ui thread panicked: {e:?}");
-            ExitCode::FAILURE
+        r = ui_thread => {
+            if let Err(e) = r {
+                eprintln!("ui thread panicked: {e:?}");
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(e) = p2p_client => {
             eprintln!("p2p client crashed: {e:?}");
@@ -67,4 +84,27 @@ async fn main() -> ExitCode {
         }
         else => ExitCode::SUCCESS
     }
+}
+
+fn enable_logging(path: PathBuf) {
+    use tracing_subscriber::{
+        filter::EnvFilter, layer::SubscriberExt, util::SubscriberInitExt, Layer,
+    };
+
+    let file = File::create(path).expect("failed to open log file");
+    let layer = tracing_subscriber::fmt::layer()
+        .pretty()
+        .with_writer(Arc::new(file))
+        .with_filter(
+            EnvFilter::builder()
+                .with_default_directive(Level::DEBUG.into())
+                .from_env_lossy(),
+        )
+        .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
+            meta.module_path()
+                .filter(|p| p.starts_with("presunto_e_queijo"))
+                .is_some()
+        }));
+
+    tracing_subscriber::registry().with(layer).init();
 }

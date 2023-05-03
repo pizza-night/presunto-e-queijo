@@ -1,21 +1,37 @@
 mod backend;
+use std::net::SocketAddr;
+
 use backend::Backend;
 use cursive::{
     align::HAlign,
     theme::Effect,
     utils::span::SpannedString,
     view::{Nameable, Resizable, ScrollStrategy, SizeConstraint},
-    views::{Dialog, EditView, LinearLayout, ScrollView, TextView},
+    views::{Dialog, EditView, LinearLayout, NamedView, ScrollView, TextView},
     Cursive,
 };
 use tokio::sync::mpsc::{error::TryRecvError, Receiver, Sender};
 
 use crate::Str;
 
-pub enum TuiMessage {
-    UserConnected { username: Str },
-    UserDisconnected { username: Str },
-    NewMessage { username: Str, message: Str },
+#[derive(Debug)]
+pub enum UiEvent {
+    UserConnected {
+        at: SocketAddr,
+        username: Option<Str>,
+    },
+    UserDisconnected {
+        at: SocketAddr,
+    },
+    UpdateUserName {
+        at: SocketAddr,
+        new_username: Str,
+    },
+    NewMessage {
+        at: SocketAddr,
+        username: Option<Str>,
+        message: Str,
+    },
 }
 
 fn display_new_message(c: &mut Cursive, username: &str, message: &str) {
@@ -28,7 +44,7 @@ fn display_new_message(c: &mut Cursive, username: &str, message: &str) {
     });
 }
 
-pub fn ui(mut messages: Receiver<TuiMessage>, send_message: Sender<Str>) {
+pub fn ui(mut messages: Receiver<UiEvent>, send_message: Sender<Str>) {
     let mut cursive = Cursive::new();
     cursive.with_theme(|current| {
         use cursive::theme::{Color, PaletteColor};
@@ -41,7 +57,7 @@ pub fn ui(mut messages: Receiver<TuiMessage>, send_message: Sender<Str>) {
             .title(SpannedString::styled("Presunto e Queijo", Effect::Bold))
             .content(
                 LinearLayout::vertical()
-                    .child(LinearLayout::horizontal().with_name("users"))
+                    .child(LinearLayout::vertical().with_name("users"))
                     .child(TextView::new("=".repeat(60)).h_align(HAlign::Center))
                     .child(
                         ScrollView::new(LinearLayout::vertical().with_name("messages"))
@@ -78,20 +94,46 @@ pub fn ui(mut messages: Receiver<TuiMessage>, send_message: Sender<Str>) {
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break runner.quit(),
             };
+            tracing::debug!(?m);
             match m {
-                TuiMessage::UserConnected { username } => {
+                UiEvent::UserConnected { at, username } => {
+                    let at_str = at.to_string();
+                    let username = username.as_deref().unwrap_or(&at_str);
                     runner.call_on_name("users", |users: &mut LinearLayout| {
-                        users.add_child(TextView::new(&*username).with_name(&*username));
+                        users.add_child(
+                            TextView::new(format!("{username}@{at}")).with_name(&at_str),
+                        );
                     });
                 }
-                TuiMessage::UserDisconnected { username } => {
+                UiEvent::UpdateUserName { at, new_username } => {
+                    let at_str = at.to_string();
                     runner.call_on_name("users", |users: &mut LinearLayout| {
-                        if let Some(u) = users.find_child_from_name(&username) {
+                        if let Some(u) = users.find_child_from_name(&at_str) {
+                            if let Some(tview) = users
+                                .get_child_mut(u)
+                                .unwrap()
+                                .downcast_mut::<NamedView<TextView>>()
+                            {
+                                *tview = TextView::new(format!("{new_username}@{at}"))
+                                    .with_name(&at_str);
+                            }
+                        }
+                    });
+                }
+                UiEvent::UserDisconnected { at } => {
+                    let at_str = at.to_string();
+                    runner.call_on_name("users", |users: &mut LinearLayout| {
+                        if let Some(u) = users.find_child_from_name(&at_str) {
                             users.remove_child(u);
                         }
                     });
                 }
-                TuiMessage::NewMessage { username, message } => {
+                UiEvent::NewMessage {
+                    at,
+                    username,
+                    message,
+                } => {
+                    let username = username.unwrap_or_else(|| at.to_string().into());
                     display_new_message(&mut runner, &username, &message)
                 }
             }
