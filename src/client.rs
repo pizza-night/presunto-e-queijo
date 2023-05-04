@@ -4,7 +4,7 @@ use std::{
     io,
     mem::take,
     net::{IpAddr, SocketAddr},
-    pin::{pin, Pin},
+    pin::pin,
     time::Duration,
 };
 
@@ -13,10 +13,7 @@ use futures_buffered::FuturesUnorderedBounded;
 use thiserror::Error;
 use tokio::{
     io::BufReader,
-    net::{
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
-        TcpListener, TcpStream,
-    },
+    net::{tcp::OwnedReadHalf, TcpListener, TcpStream},
     sync::mpsc::{Receiver, Sender},
     time::timeout,
 };
@@ -81,19 +78,38 @@ pub async fn run(
     }
 }
 
-struct Peer {
-    name: Option<Str>,
-    messages: Pin<Box<dyn Stream<Item = PizzaMessage>>>,
-    socket: OwnedWriteHalf,
-}
+pub use peer::Peer;
+mod peer {
+    use std::pin::Pin;
 
-impl Peer {
-    fn new<N: Into<Option<Str>>>(name: N, socket: TcpStream) -> Self {
-        let (rx_socket, tx_socket) = socket.into_split();
-        Self {
-            name: name.into(),
-            messages: Box::pin(receive_messages(rx_socket)),
-            socket: tx_socket,
+    use futures::Stream;
+    use tokio::{
+        io::BufWriter,
+        net::{tcp::OwnedWriteHalf, TcpStream},
+    };
+
+    use crate::{message::PizzaMessage, Str};
+
+    use super::{receive_messages, ClientTermination};
+
+    pub struct Peer {
+        pub name: Option<Str>,
+        pub messages: Pin<Box<dyn Stream<Item = PizzaMessage>>>,
+        socket: BufWriter<OwnedWriteHalf>,
+    }
+
+    impl Peer {
+        pub fn new<N: Into<Option<Str>>>(name: N, socket: TcpStream) -> Self {
+            let (rx_socket, tx_socket) = socket.into_split();
+            Self {
+                name: name.into(),
+                messages: Box::pin(receive_messages(rx_socket)),
+                socket: BufWriter::new(tx_socket),
+            }
+        }
+
+        pub(super) async fn send(&mut self, msg: &PizzaMessage) -> Result<(), ClientTermination> {
+            Ok(msg.write(&mut self.socket).await?)
         }
     }
 }
@@ -186,7 +202,7 @@ impl Client {
             let set_name = SetName {
                 name: take(&mut self.username),
             };
-            let r = set_name.write(&mut peer.socket).await;
+            let r = peer.send(&set_name).await;
             let SetName { name } = set_name else {
                 unreachable!()
             };
@@ -209,7 +225,7 @@ impl Client {
                 },
             );
 
-            if let Err(e) = PizzaMessage::write(&NewPeers { ipv4, ipv6 }, &mut peer.socket).await {
+            if let Err(e) = peer.send(&NewPeers { ipv4, ipv6 }).await {
                 tracing::error!(?e, "sending new peers");
                 return Ok(());
             }
@@ -316,7 +332,7 @@ impl Client {
     async fn broadcast_message(&mut self, message: PizzaMessage) -> Vec<SocketAddr> {
         stream::iter(self.peers.iter_mut().map(|(addr, p)| {
             tracing::debug!(?message, to = ?addr, "sending message");
-            async { (*addr, message.write(&mut p.socket).await) }
+            async { (*addr, p.send(&message).await) }
         }))
         .buffer_unordered(16)
         .filter_map(|(addr, result)| ready(result.is_err().then_some(addr)))

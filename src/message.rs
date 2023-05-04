@@ -137,6 +137,7 @@ impl PizzaMessage {
                 }
             }
         }
+        sink.flush().await?;
 
         Ok(())
     }
