@@ -1,4 +1,4 @@
-use std::{fs::File, path::PathBuf, process::ExitCode, sync::Arc, net::SocketAddr};
+use std::{fs::File, net::SocketAddr, path::PathBuf, process::ExitCode, sync::Arc};
 
 use clap::Parser;
 use futures::future::OptionFuture;
@@ -72,7 +72,16 @@ async fn main() -> ExitCode {
     tokio::select! {
         r = ui_thread => {
             if let Err(e) = r {
-                eprintln!("ui thread panicked: {e:?}");
+                match e.try_into_panic() {
+                    Ok(panic) => {
+                        if let Some(s) = panic.downcast_ref::<String>() {
+                            eprintln!("ui thread panicked: {s:?}");
+                        } else {
+                            eprintln!("ui thread panicked: {panic:?}");
+                        }
+                    }
+                    Err(e) => eprintln!("ui thread aborted: {e:?}"),
+                }
                 ExitCode::FAILURE
             } else {
                 ExitCode::SUCCESS

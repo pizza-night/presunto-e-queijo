@@ -37,7 +37,7 @@ pub async fn run(
     internal_message: Receiver<ui::Request>,
     ClientOpts { port, username }: ClientOpts,
 ) -> io::Result<()> {
-    tracing::debug!("starting server");
+    tracing::debug!(%port, "starting server");
     let server = TcpListener::bind(("0.0.0.0", port)).await?;
 
     let mut client = Client {
@@ -132,6 +132,7 @@ enum ClientTermination {
 }
 
 impl Client {
+    #[tracing::instrument(skip(self))]
     async fn run(mut self) -> Result<(), ClientTermination> {
         loop {
             tokio::select! {
@@ -262,12 +263,14 @@ impl Client {
         peer: SocketAddr,
         body: Str,
     ) -> Result<(), ClientTermination> {
+        tracing::info!("received a new message");
         let name = &self.peers[&peer].name;
         self.ui.new_message(peer, name.clone(), body).await
     }
 
     #[tracing::instrument(skip(self))]
     async fn set_name(&mut self, peer: SocketAddr, name: Str) -> Result<(), ClientTermination> {
+        tracing::info!("setting peer name");
         if let Some(p) = self.peers.get_mut(&peer) {
             if p.name.as_ref() != Some(&name) {
                 let new = p.name.insert(name);
@@ -286,6 +289,8 @@ impl Client {
             .filter(|ip| !self.peers.contains_key(ip))
             .collect::<Vec<_>>();
 
+        tracing::info!(?ips, "adding new peers");
+
         let username = take(&mut self.username);
         let Self { peers, ref ui, .. } = self;
         let set_name = PizzaMessage::SetName { name: username };
@@ -294,21 +299,20 @@ impl Client {
             let connected_peers = stream::iter(ips)
             .map(|addr| async move {
                 match timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
-                    Ok(Ok(mut sock)) => {
-                        if let Err(e) = set_name.write(&mut sock).await {
+                    Ok(Ok(sock)) => {
+                        let addr = sock.peer_addr().unwrap();
+                        let mut peer = Peer::new(None, sock);
+                        if let Err(e) = peer.send(set_name).await {
                             tracing::error!(to = %addr, ?e, "failed to send set name to new peer");
                         }
-                        Some(sock)
+                        Some((addr, peer))
                     }
                     _ => None,
                 }
             })
             .buffered(16)
             .filter_map(ready)
-            .then(|sock| async move {
-                let peer_addr = sock.peer_addr().unwrap();
-                let peer = Peer::new(None, sock);
-
+            .then(|(peer_addr, peer)| async move {
                 ui.user_connected(peer_addr, None).await?;
 
                 Ok::<_, ClientTermination>((peer_addr, peer))
@@ -330,6 +334,7 @@ impl Client {
 
     #[instrument(skip(self))]
     async fn broadcast_message(&mut self, message: PizzaMessage) -> Vec<SocketAddr> {
+        tracing::info!("broadcasting message");
         stream::iter(self.peers.iter_mut().map(|(addr, p)| {
             tracing::debug!(?message, to = ?addr, "sending message");
             async { (*addr, p.send(&message).await) }
@@ -365,10 +370,15 @@ fn receive_messages(socket: OwnedReadHalf) -> impl Stream<Item = PizzaMessage> {
                 Err(message::ParseError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
                     break;
                 }
+                Err(message::ParseError::EvilClient) => {
+                    tracing::error!("evil client detected!");
+                    // break;
+                }
                 Err(e) => {
-                    eprintln!(
-                        "failed to read message from peer {:?}: {e:?}",
-                        buffered.get_ref().peer_addr()
+                    tracing::error!(
+                        peer = ?buffered.get_ref().peer_addr(),
+                        e = ?e,
+                        "failed to read message from peer",
                     );
                     continue;
                 }

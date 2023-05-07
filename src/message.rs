@@ -31,11 +31,14 @@ pub enum ParseError {
     InvalidType { ty: u8 },
     #[error("utf8 {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
+    #[error("evil client!")]
+    EvilClient,
 }
 
 impl PizzaMessage {
     pub async fn read<R: AsyncRead + Unpin>(source: &mut R) -> Result<Self, ParseError> {
         let ty = source.read_u8().await?;
+        tracing::trace!("read type {ty}");
         let msg = match ty {
             0 => Self::read_text(source).await,
             1 => Self::read_set_name(source).await,
@@ -49,9 +52,14 @@ impl PizzaMessage {
     async fn read_text<R: AsyncRead + Unpin>(source: &mut R) -> Result<Self, ParseError> {
         let vec = {
             let len = source.read_u32().await?;
+            tracing::trace!("reading text of size {len}");
+            if len > u16::MAX.into() {
+                return Err(ParseError::EvilClient);
+            }
             let mut buf = Vec::<u8>::with_capacity(len as usize).limit(len as usize);
             while buf.remaining_mut() > 0 {
-                source.read_buf(&mut buf).await?;
+                let read = source.read_buf(&mut buf).await?;
+                tracing::trace!("read {read} bytes. {} bytes missing", buf.remaining_mut());
             }
             buf.into_inner()
         };
@@ -64,9 +72,11 @@ impl PizzaMessage {
     async fn read_set_name<R: AsyncRead + Unpin>(source: &mut R) -> Result<Self, ParseError> {
         let vec = {
             let len = source.read_u8().await?;
+            tracing::trace!("reading name of size {len}");
             let mut buf = Vec::<u8>::with_capacity(len as usize).limit(len as usize);
             while buf.remaining_mut() > 0 {
-                source.read_buf(&mut buf).await?;
+                let read = source.read_buf(&mut buf).await?;
+                tracing::trace!("read {read} bytes. {} bytes missing", buf.remaining_mut());
             }
             buf.into_inner()
         };
