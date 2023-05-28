@@ -50,14 +50,18 @@ pub async fn run(
         },
     };
 
-    if let Err(e) = client
-        .add_new_peers(initial_peers.iter().map(|(_, addr)| *addr))
-        .await
+    match timeout(
+        Duration::from_secs(5),
+        client.add_new_peers(initial_peers.iter().map(|(_, addr)| *addr)),
+    )
+    .await
     {
-        match e {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => match e {
             ClientTermination::UiClosed => return Ok(()),
             ClientTermination::Io(e) => return Err(e),
-        }
+        },
+        Err(_) => {}
     }
 
     for (name, addr) in initial_peers
