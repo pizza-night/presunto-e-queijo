@@ -1,7 +1,7 @@
 use std::{
     fmt::Display,
     io,
-    net::{IpAddr, SocketAddr},
+    net::{SocketAddr, ToSocketAddrs},
     path::Path,
 };
 
@@ -51,6 +51,8 @@ pub enum ConfigParseErrorKind {
     MissingColon,
     #[error("invalid ip, found {found:?}")]
     InvalidIp { found: String },
+    #[error("failed to resolve host {host} because {error}")]
+    FailedToResolve { host: String, error: io::Error },
 }
 
 pub async fn load<P: AsRef<Path>>(path: P) -> Result<Peers, LoadConfigError> {
@@ -69,17 +71,30 @@ pub async fn load<P: AsRef<Path>>(path: P) -> Result<Peers, LoadConfigError> {
                 });
             };
 
-            let ip = ip
-                .parse::<SocketAddr>()
-                .or_else(|_| ip.parse::<IpAddr>().map(|ip| SocketAddr::new(ip, 2504)))
-                .map_err(|_| ConfigParseError {
+            let column = || name.chars().count() + 1;
+            let ip = match ip
+                .to_socket_addrs()
+                .or_else(|_| (ip, 2504u16).to_socket_addrs())
+            {
+                Ok(mut addrs) => Ok(addrs.next().unwrap()),
+                Err(e) if e.kind() == io::ErrorKind::InvalidInput => Err(ConfigParseError {
                     line_no,
-                    column: name.chars().count() + 1,
+                    column: column(),
                     line: line.to_owned(),
                     kind: ConfigParseErrorKind::InvalidIp {
                         found: ip.to_owned(),
                     },
-                })?;
+                }),
+                Err(e) => Err(ConfigParseError {
+                    line_no,
+                    column: column(),
+                    line: line.to_owned(),
+                    kind: ConfigParseErrorKind::FailedToResolve {
+                        host: ip.to_owned(),
+                        error: e,
+                    },
+                }),
+            }?;
             Ok((Some(name.into()), ip))
         })
         .collect::<Result<Vec<_>, _>>()?;
