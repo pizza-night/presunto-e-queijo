@@ -161,7 +161,7 @@ impl Client {
         }
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip(self, message))]
     async fn handle_message(
         &mut self,
         peer: SocketAddr,
@@ -189,8 +189,8 @@ impl Client {
 
     #[instrument(skip(self))]
     async fn handle_disconnect_of(&mut self, peer: SocketAddr) -> Result<(), ClientTermination> {
-        self.peers.remove(&peer).unwrap();
         tracing::debug!("disconnected");
+        self.peers.remove(&peer).unwrap();
         self.ui.user_disconnected(peer).await
     }
 
@@ -293,7 +293,7 @@ impl Client {
             .filter(|ip| !self.peers.contains_key(ip))
             .collect::<Vec<_>>();
 
-        tracing::info!(?ips, "adding new peers");
+        tracing::info!(count = %ips.len(), "adding new peers");
 
         let username = take(&mut self.username);
         let Self { peers, ref ui, .. } = self;
@@ -302,7 +302,8 @@ impl Client {
             let set_name = &set_name;
             let connected_peers = stream::iter(ips)
             .map(|addr| async move {
-                match timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
+                tracing::debug!("connecting to {addr}");
+                match timeout(Duration::from_secs(1), TcpStream::connect(addr)).await {
                     Ok(Ok(sock)) => {
                         let addr = sock.peer_addr().unwrap();
                         let mut peer = Peer::new(None, sock);
