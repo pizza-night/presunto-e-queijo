@@ -45,7 +45,7 @@ impl PizzaMessage {
             2 => Self::read_new_peers(source).await,
             _ => Err(ParseError::InvalidType { ty }),
         };
-        tracing::debug!(ty, ?msg, "received message");
+        tracing::trace!(ty, ?msg, "received message");
         msg
     }
 
@@ -64,6 +64,9 @@ impl PizzaMessage {
             buf.into_inner()
         };
 
+        if vec.contains(&b'0') {
+            return Err(ParseError::EvilClient);
+        }
         Ok(PizzaMessage::Text {
             body: String::from_utf8(vec)?.into(),
         })
@@ -81,6 +84,9 @@ impl PizzaMessage {
             buf.into_inner()
         };
 
+        if vec.contains(&b'0') {
+            return Err(ParseError::EvilClient);
+        }
         Ok(PizzaMessage::SetName {
             name: String::from_utf8(vec)?.into(),
         })
@@ -122,8 +128,9 @@ impl PizzaMessage {
 }
 
 impl PizzaMessage {
+    #[tracing::instrument(skip(sink))]
     pub async fn write<W: AsyncWrite + Unpin>(&self, mut sink: W) -> io::Result<()> {
-        tracing::debug!(msg = ?self, "sending message");
+        tracing::debug!("sending message");
         match self {
             PizzaMessage::Text { body } => {
                 sink.write_u8(0).await?;
