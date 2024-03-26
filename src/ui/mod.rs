@@ -1,7 +1,7 @@
 mod backend;
 mod views;
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use backend::Backend;
 use cursive::{
@@ -26,6 +26,7 @@ pub enum Event {
     },
     UserDisconnected {
         at: SocketAddr,
+        username: Option<Str>,
     },
     UpdateUserName {
         at: SocketAddr,
@@ -56,6 +57,12 @@ fn display_new_message(c: &mut Cursive, addr: SocketAddr, username: Str, message
     });
 }
 
+fn display_system_message(c: &mut Cursive, message: Str) {
+    c.call_on_name(named_views::MESSAGES, |messages: &mut LinearLayout| {
+        messages.add_child(MessageView::new(SYSTEM_ADDR, "[system]".into(), message));
+    });
+}
+
 fn change_name_dialog(send_message: Sender<Request>) -> Dialog {
     Dialog::new()
         .title("change name")
@@ -73,6 +80,8 @@ fn change_name_dialog(send_message: Sender<Request>) -> Dialog {
         )
         .h_align(HAlign::Center)
 }
+
+const SYSTEM_ADDR: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
 
 pub fn ui(mut messages: Receiver<Event>, send_message: Sender<Request>) {
     let mut cursive = Cursive::new();
@@ -150,6 +159,10 @@ pub fn ui(mut messages: Receiver<Event>, send_message: Sender<Request>) {
                             TextView::new(format!("{username}@{at}")).with_name(&at_str),
                         );
                     });
+                    display_system_message(
+                        &mut runner,
+                        format!("user {username} connected").into(),
+                    );
                 }
                 Event::UpdateUserName { at, new_username } => {
                     let at_str = at.to_string();
@@ -179,13 +192,18 @@ pub fn ui(mut messages: Receiver<Event>, send_message: Sender<Request>) {
                         }
                     });
                 }
-                Event::UserDisconnected { at } => {
+                Event::UserDisconnected { at, username } => {
                     let at_str = at.to_string();
                     runner.call_on_name(named_views::USERS, |users: &mut LinearLayout| {
                         if let Some(u) = users.find_child_from_name(&at_str) {
                             users.remove_child(u);
                         }
                     });
+                    let username = username.as_deref().unwrap_or(&at_str);
+                    display_system_message(
+                        &mut runner,
+                        format!("user {username} disconnected").into(),
+                    );
                 }
                 Event::NewMessage {
                     at,

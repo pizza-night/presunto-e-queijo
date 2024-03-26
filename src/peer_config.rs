@@ -62,12 +62,12 @@ pub async fn load<P: AsRef<Path>>(path: P) -> Result<Peers, LoadConfigError> {
         .map(|l| l.trim())
         .enumerate()
         .map(|(line_no, line)| {
-            let Some((name, ip)) =  line.split_once('|') else {
+            let Some((name, ip)) = line.split_once('|') else {
                 return Err(ConfigParseError {
                     line_no,
                     column: line.chars().count().wrapping_sub(1),
                     line: line.to_owned(),
-                    kind: ConfigParseErrorKind::MissingColon
+                    kind: ConfigParseErrorKind::MissingColon,
                 });
             };
 

@@ -188,10 +188,13 @@ impl Client {
     }
 
     #[instrument(skip(self))]
-    async fn handle_disconnect_of(&mut self, peer: SocketAddr) -> Result<(), ClientTermination> {
+    async fn handle_disconnect_of(
+        &mut self,
+        peer_addr: SocketAddr,
+    ) -> Result<(), ClientTermination> {
         tracing::debug!("disconnected");
-        self.peers.remove(&peer).unwrap();
-        self.ui.user_disconnected(peer).await
+        let peer = self.peers.remove(&peer_addr).unwrap();
+        self.ui.user_disconnected(peer_addr, peer.name).await
     }
 
     #[instrument(skip(self, socket))]
@@ -427,8 +430,12 @@ impl UiHandle {
             .map_err(|_| ClientTermination::UiClosed)
     }
 
-    async fn user_disconnected(&self, at: SocketAddr) -> Result<(), ClientTermination> {
-        let tui_msg = ui::Event::UserDisconnected { at };
+    async fn user_disconnected(
+        &self,
+        at: SocketAddr,
+        username: Option<Str>,
+    ) -> Result<(), ClientTermination> {
+        let tui_msg = ui::Event::UserDisconnected { at, username };
         self.external_message
             .send(tui_msg)
             .await
