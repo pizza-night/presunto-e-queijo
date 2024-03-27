@@ -98,7 +98,7 @@ mod peer {
 
     pub struct Peer {
         pub name: Option<Str>,
-        pub messages: Pin<Box<dyn Stream<Item = PizzaMessage>>>,
+        pub messages: Pin<Box<dyn Stream<Item = PizzaMessage> + Send + Sync>>,
         socket: BufWriter<OwnedWriteHalf>,
     }
 
@@ -145,16 +145,19 @@ impl Client {
                         Ok(x) => x,
                         Err(e) => return Err(ClientTermination::Io(e)),
                     };
+                    tracing::warn!(%addr, "accepted connection");
                     self.handle_connection_of(socket, addr).await?;
                 }
                 // None means there are no clients
-                Some(recv_msg) = read_message(&mut self.peers) => {
-                    match recv_msg {
-                        Ok((peer, message)) => self.handle_message(peer, message).await?,
-                        Err(addr) => self.handle_disconnect_of(addr).await?,
+                Some((addr, msg)) = read_message(&mut self.peers) => {
+                    tracing::warn!(%addr, "received message");
+                    match msg {
+                        Some(message) => self.handle_message(addr, message).await?,
+                        None => self.handle_disconnect_of(addr).await?,
                     }
                 }
                 ui_request = self.ui.recv_ui_request() => {
+                    tracing::warn!(?ui_request, "got ui request");
                     self.handle_ui_request(ui_request?).await?;
                 }
             }
@@ -342,27 +345,33 @@ impl Client {
 
     #[instrument(skip(self))]
     async fn broadcast_message(&mut self, message: PizzaMessage) -> Vec<SocketAddr> {
-        tracing::info!("broadcasting message");
+        tracing::info!(peers = %self.peers.len(), "broadcasting message");
         stream::iter(self.peers.iter_mut().map(|(addr, p)| {
-            tracing::debug!(?message, to = ?addr, "sending message");
-            async { (*addr, p.send(&message).await) }
+            let message = &message;
+            async move {
+                tracing::debug!(?message, to = ?addr, "sending message");
+                (*addr, p.send(message).await)
+            }
         }))
         .buffer_unordered(16)
-        .filter_map(|(addr, result)| ready(result.is_err().then_some(addr)))
+        .filter_map(|(addr, result)| {
+            tracing::debug!(?message, to = ?addr, "sent message");
+            ready(result.is_err().then_some(addr))
+        })
         .collect()
         .await
     }
 }
 
-async fn read_message(peers: &mut Peers) -> Option<Result<(SocketAddr, PizzaMessage), SocketAddr>> {
+async fn read_message(peers: &mut Peers) -> Option<(SocketAddr, Option<PizzaMessage>)> {
     if peers.is_empty() {
         return None;
     }
 
-    FuturesUnorderedBounded::from_iter(peers.iter_mut().map(|(addr, p)| async {
+    FuturesUnorderedBounded::from_iter(peers.iter_mut().map(|(addr, p)| async move {
         match p.messages.next().await {
-            Some(msg) => Ok((*addr, msg)),
-            None => Err(*addr),
+            Some(msg) => (*addr, Some(msg)),
+            None => (*addr, None),
         }
     }))
     .next()

@@ -10,12 +10,13 @@ anyhow = "1.0.70"
 async-stream = "0.3.5"
 bytes = "1.4.0"
 clap = { version = "4.2.4", features = ["derive"] }
+console-subscriber = "0.1.9"
 cursive = { version = "0.20.0", features = ["crossterm-backend"] }
 futures = "0.3.28"
 futures-buffered = "0.2.4"
 nom = "7.1.3"
 thiserror = "1.0.40"
-tokio = { version = "1.28.0", features = ["full"] }
+tokio = { version = "1.28.0", features = ["full", "tracing"] }
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 whoami = "1.4.0"
