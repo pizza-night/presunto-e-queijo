@@ -1,7 +1,6 @@
-use std::{
-    io,
-    net::{Ipv4Addr, Ipv6Addr},
-};
+use std::io;
+#[cfg(feature = "peer-discovery")]
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use bytes::BufMut;
 use thiserror::Error;
@@ -14,9 +13,11 @@ pub enum PizzaMessage {
     Text {
         body: Str,
     },
+    #[cfg(feature = "peer-discovery")]
     SetName {
         name: Str,
     },
+    #[cfg(feature = "peer-discovery")]
     NewPeers {
         ipv4: Vec<Ipv4Addr>,
         ipv6: Vec<Ipv6Addr>,
@@ -41,7 +42,9 @@ impl PizzaMessage {
         tracing::trace!("read type {ty}");
         let msg = match ty {
             0 => Self::read_text(source).await,
+            #[cfg(feature = "peer-discovery")]
             1 => Self::read_set_name(source).await,
+            #[cfg(feature = "peer-discovery")]
             2 => Self::read_new_peers(source).await,
             _ => Err(ParseError::InvalidType { ty }),
         };
@@ -72,6 +75,7 @@ impl PizzaMessage {
         })
     }
 
+    #[cfg(feature = "peer-discovery")]
     async fn read_set_name<R: AsyncRead + Unpin>(source: &mut R) -> Result<Self, ParseError> {
         let vec = {
             let len = source.read_u8().await?;
@@ -92,6 +96,7 @@ impl PizzaMessage {
         })
     }
 
+    #[cfg(feature = "peer-discovery")]
     async fn read_new_peers<R: AsyncRead + Unpin>(source: &mut R) -> Result<Self, ParseError> {
         let ipv4_count = source.read_u8().await?;
         let ipv6_count = source.read_u8().await?;
@@ -100,6 +105,7 @@ impl PizzaMessage {
         Ok(Self::NewPeers { ipv4, ipv6 })
     }
 
+    #[cfg(feature = "peer-discovery")]
     #[tracing::instrument(skip(source))]
     async fn read_ips<const N: usize, Ip, R>(
         source: &mut R,
@@ -137,11 +143,13 @@ impl PizzaMessage {
                 sink.write_u32(body.len() as _).await?;
                 sink.write_all(body.as_bytes()).await?;
             }
+            #[cfg(feature = "peer-discovery")]
             PizzaMessage::SetName { name: body } => {
                 sink.write_u8(1).await?;
                 sink.write_u8(body.len() as _).await?;
                 sink.write_all(body.as_bytes()).await?;
             }
+            #[cfg(feature = "peer-discovery")]
             PizzaMessage::NewPeers { ipv4, ipv6 } => {
                 sink.write_u8(2).await?;
                 sink.write_u8(ipv4.len() as _).await?;

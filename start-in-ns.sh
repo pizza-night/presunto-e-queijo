@@ -24,6 +24,7 @@ else
     username=$1
 fi
 
+read -p "press enter to start"
 sudo ip netns exec $1 \
     ./target/debug/presunto-e-queijo \
     -u $username "${initial_peer[@]}" \

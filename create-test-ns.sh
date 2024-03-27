@@ -5,6 +5,8 @@ clients=(peq1 peq2 peq3)
 bash -x ./drop-test-ns.sh
 ip --color=always addr
 
+set -x
+
 for c in ${clients[@]}; do
     sudo ip netns add $c
 done

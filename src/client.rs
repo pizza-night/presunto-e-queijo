@@ -1,11 +1,7 @@
+#[cfg(feature = "peer-discovery")]
+use std::net::IpAddr;
 use std::{
-    collections::HashMap,
-    future::ready,
-    io,
-    mem::take,
-    net::{IpAddr, SocketAddr},
-    pin::pin,
-    time::Duration,
+    collections::HashMap, future::ready, io, mem::take, net::SocketAddr, pin::pin, time::Duration,
 };
 
 use futures::{stream, Stream, StreamExt};
@@ -24,6 +20,7 @@ use crate::{
     peer_config, ui, Str,
 };
 
+#[cfg(feature = "peer-discovery")]
 const DEFAULT_PORT: u16 = 2504;
 
 pub struct ClientOpts {
@@ -174,9 +171,11 @@ impl Client {
             PizzaMessage::Text { body } => {
                 self.new_text_message(peer, body).await?;
             }
+            #[cfg(feature = "peer-discovery")]
             PizzaMessage::SetName { name } => {
                 self.set_name(peer, name).await?;
             }
+            #[cfg(feature = "peer-discovery")]
             PizzaMessage::NewPeers { ipv4, ipv6 } => {
                 self.add_new_peers(
                     ipv4.into_iter()
@@ -207,38 +206,42 @@ impl Client {
         from: SocketAddr,
     ) -> Result<(), ClientTermination> {
         tracing::debug!("got a new connection");
+        #[cfg_attr(not(feature = "peer-discovery"), allow(unused_mut))]
         let mut peer = Peer::new(None, socket);
-        use PizzaMessage::{NewPeers, SetName};
+        #[cfg(feature = "peer-discovery")]
         {
-            let set_name = SetName {
-                name: take(&mut self.username),
-            };
-            let r = peer.send(&set_name).await;
-            let SetName { name } = set_name else {
-                unreachable!()
-            };
-            self.username = name;
+            use PizzaMessage::{NewPeers, SetName};
+            {
+                let set_name = SetName {
+                    name: take(&mut self.username),
+                };
+                let r = peer.send(&set_name).await;
+                let SetName { name } = set_name else {
+                    unreachable!()
+                };
+                self.username = name;
 
-            if let Err(e) = r {
-                tracing::error!(?e, "sending set name");
-                return Ok(());
+                if let Err(e) = r {
+                    tracing::error!(?e, "sending set name");
+                    return Ok(());
+                }
             }
-        }
-        {
-            let (ipv4, ipv6) = self.peers.keys().fold(
-                (Vec::default(), Vec::default()),
-                |(mut v4, mut v6), peer| {
-                    match peer.ip() {
-                        IpAddr::V4(ip) => v4.push(ip),
-                        IpAddr::V6(ip) => v6.push(ip),
-                    }
-                    (v4, v6)
-                },
-            );
+            {
+                let (ipv4, ipv6) = self.peers.keys().fold(
+                    (Vec::default(), Vec::default()),
+                    |(mut v4, mut v6), peer| {
+                        match peer.ip() {
+                            IpAddr::V4(ip) => v4.push(ip),
+                            IpAddr::V6(ip) => v6.push(ip),
+                        }
+                        (v4, v6)
+                    },
+                );
 
-            if let Err(e) = peer.send(&NewPeers { ipv4, ipv6 }).await {
-                tracing::error!(?e, "sending new peers");
-                return Ok(());
+                if let Err(e) = peer.send(&NewPeers { ipv4, ipv6 }).await {
+                    tracing::error!(?e, "sending new peers");
+                    return Ok(());
+                }
             }
         }
         self.ui.user_connected(from, peer.name.clone()).await?;
@@ -256,7 +259,15 @@ impl Client {
                 self.broadcast_message(PizzaMessage::Text { body }).await
             }
             ui::Request::ChangeName { name } => {
-                self.broadcast_message(PizzaMessage::SetName { name }).await
+                #[cfg(feature = "peer-discovery")]
+                {
+                    self.broadcast_message(PizzaMessage::SetName { name }).await
+                }
+                #[cfg(not(feature = "peer-discovery"))]
+                {
+                    let _ = name;
+                    vec![]
+                }
             }
         };
         for peer in disconnected {
@@ -303,8 +314,10 @@ impl Client {
 
         let username = take(&mut self.username);
         let Self { peers, ref ui, .. } = self;
+        #[cfg(feature = "peer-discovery")]
         let set_name = PizzaMessage::SetName { name: username };
         {
+            #[cfg(feature = "peer-discovery")]
             let set_name = &set_name;
             let connected_peers = stream::iter(ips)
             .map(|addr| async move {
@@ -312,7 +325,9 @@ impl Client {
                 match timeout(Duration::from_secs(1), TcpStream::connect(addr)).await {
                     Ok(Ok(sock)) => {
                         let addr = sock.peer_addr().unwrap();
+                        #[cfg_attr(not(feature = "peer-discovery"), allow(unused_mut))]
                         let mut peer = Peer::new(None, sock);
+                        #[cfg(feature = "peer-discovery")]
                         if let Err(e) = peer.send(set_name).await {
                             tracing::error!(to = %addr, ?e, "failed to send set name to new peer");
                         }
@@ -336,13 +351,16 @@ impl Client {
             }
         }
 
-        let PizzaMessage::SetName { name } = set_name else {
+        #[cfg(feature = "peer-discovery")]
+        let PizzaMessage::SetName { name: username } = set_name
+        else {
             unreachable!()
         };
-        self.username = name;
+        self.username = username;
         Ok(())
     }
 
+    /// Returns the addresses of the peers that failed to receive the message
     #[instrument(skip(self))]
     async fn broadcast_message(&mut self, message: PizzaMessage) -> Vec<SocketAddr> {
         tracing::info!(peers = %self.peers.len(), "broadcasting message");
