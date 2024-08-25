@@ -34,6 +34,11 @@ pub async fn run(
     internal_message: Receiver<ui::Request>,
     ClientOpts { port, username }: ClientOpts,
 ) -> io::Result<()> {
+    let handle_client_termination = |reason| match reason {
+        ClientTermination::UiClosed => Ok(()),
+        ClientTermination::Io(e) => Err(e),
+    };
+
     tracing::debug!(%port, "starting server");
     let server = TcpListener::bind(("0.0.0.0", port)).await?;
 
@@ -53,30 +58,20 @@ pub async fn run(
     )
     .await
     {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => match e {
-            ClientTermination::UiClosed => return Ok(()),
-            ClientTermination::Io(e) => return Err(e),
-        },
-        Err(_) => {}
+        Ok(Ok(())) | Err(_ /* timed_out */) => {}
+        Ok(Err(e)) => return handle_client_termination(e),
     }
 
-    for (name, addr) in initial_peers
-        .into_iter()
-        .filter_map(|(n, a)| n.map(|n| (n, a)))
-    {
+    for (name, addr) in initial_peers.into_iter().filter_map(|(n, a)| Some((n?, a))) {
         if let Err(e) = client.set_name(addr, name).await {
-            match e {
-                ClientTermination::UiClosed => return Ok(()),
-                ClientTermination::Io(e) => return Err(e),
-            }
+            return handle_client_termination(e);
         };
     }
 
-    match client.run().await {
-        Ok(_) | Err(ClientTermination::UiClosed) => Ok(()),
-        Err(ClientTermination::Io(e)) => Err(e),
+    if let Err(e) = client.run().await {
+        return handle_client_termination(e);
     }
+    Ok(())
 }
 
 pub use peer::Peer;
@@ -139,22 +134,22 @@ impl Client {
             tokio::select! {
                 r = self.server.accept() => {
                     let (socket, addr) = match r {
-                        Ok(x) => x,
+                        Ok(sock_addr) => sock_addr,
                         Err(e) => return Err(ClientTermination::Io(e)),
                     };
-                    tracing::warn!(%addr, "accepted connection");
+                    tracing::info!(%addr, "accepted connection");
                     self.handle_connection_of(socket, addr).await?;
                 }
                 // None means there are no clients
-                Some((addr, msg)) = read_message(&mut self.peers) => {
-                    tracing::warn!(%addr, "received message");
+                Some((addr, msg)) = read_from_peers(&mut self.peers) => {
+                    tracing::info!(%addr, "received message");
                     match msg {
-                        Some(message) => self.handle_message(addr, message).await?,
-                        None => self.handle_disconnect_of(addr).await?,
+                        PeerDid::Send(message) => self.handle_message(addr, message).await?,
+                        PeerDid::Disconnect => self.handle_disconnect_of(addr).await?,
                     }
                 }
                 ui_request = self.ui.recv_ui_request() => {
-                    tracing::warn!(?ui_request, "got ui request");
+                    tracing::info!(?ui_request, "got ui request");
                     self.handle_ui_request(ui_request?).await?;
                 }
             }
@@ -381,15 +376,20 @@ impl Client {
     }
 }
 
-async fn read_message(peers: &mut Peers) -> Option<(SocketAddr, Option<PizzaMessage>)> {
+enum PeerDid {
+    Send(PizzaMessage),
+    Disconnect,
+}
+
+async fn read_from_peers(peers: &mut Peers) -> Option<(SocketAddr, PeerDid)> {
     if peers.is_empty() {
         return None;
     }
 
     FuturesUnorderedBounded::from_iter(peers.iter_mut().map(|(addr, p)| async move {
         match p.messages.next().await {
-            Some(msg) => (*addr, Some(msg)),
-            None => (*addr, None),
+            Some(msg) => (*addr, PeerDid::Send(msg)),
+            None => (*addr, PeerDid::Disconnect),
         }
     }))
     .next()
